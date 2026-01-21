@@ -19,7 +19,7 @@ from reportlab.platypus import (
 # -----------------------------
 # Config (sin parámetros visibles)
 # -----------------------------
-st.set_page_config(page_title="DISC (Colores) — Cuestionario + Informe", layout="wide")
+st.set_page_config(page_title="DISC — Cuestionario + Informe", layout="wide")
 
 LIKERT_MIN, LIKERT_MAX = 1, 5
 Dim = Literal["D", "I", "S", "C", "V"]
