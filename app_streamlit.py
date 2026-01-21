@@ -1,5 +1,7 @@
 import io
 import math
+import time
+import random
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Tuple
 
@@ -11,20 +13,25 @@ from reportlab.lib.units import cm
 from reportlab.lib.utils import ImageReader
 
 # -----------------------------
-# Page config
+# Config (sin parámetros visibles)
 # -----------------------------
-st.set_page_config(page_title="DISC (Colores) — Informe", layout="wide")
+st.set_page_config(page_title="DISC (Colores) — Cuestionario + Informe", layout="wide")
 
 LIKERT_MIN, LIKERT_MAX = 1, 5
-Dim = Literal["D", "I", "S", "C", "V"]  # V = validez (opcional)
+Dim = Literal["D", "I", "S", "C", "V"]  # V = validez (oculta en UI)
 
-# Colores (Rodeado de idiotas / Surrounded by Idiots)
+# Defaults internos
+BLEND_RATIO_DEFAULT = 0.90
+BLEND_ABS_DEFAULT = 2
+VALIDITY_THRESHOLD_DEFAULT = 24  # 0–30 con 6 ítems V
+
+# Colores tipo "Rodeado de idiotas"
 COLOR_HEX = {
     "D": "#E53935",  # Rojo
     "I": "#FBC02D",  # Amarillo
     "S": "#43A047",  # Verde
     "C": "#1E88E5",  # Azul
-    "V": "#6D6D6D",  # Gris
+    "V": "#6D6D6D",
 }
 COLOR_NAME = {"D": "Rojo", "I": "Amarillo", "S": "Verde", "C": "Azul"}
 
@@ -35,7 +42,6 @@ DIM_NAMES = {
     "C": "Cumplimiento / Conciencia",
 }
 
-# UI labels
 LIKERT_LABELS = {
     1: "1 — Totalmente en desacuerdo",
     2: "2 — En desacuerdo",
@@ -44,11 +50,8 @@ LIKERT_LABELS = {
     5: "5 — Totalmente de acuerdo",
 }
 
-LIKERT_EMOJI = {1: "😟", 2: "🙁", 3: "😐", 4: "🙂", 5: "😄"}
-
-
 # -----------------------------
-# Questionnaire
+# Data
 # -----------------------------
 @dataclass(frozen=True)
 class Item:
@@ -107,7 +110,7 @@ def get_items() -> List[Item]:
         Item("C09", "Prefiero mensajes estructurados: objetivos, pasos, criterios.", "C"),
         Item("C10", "A menudo entrego sin revisar porque confío en mi primera versión.", "C", reverse=True),
 
-        # --- Validez (opcional) ---
+        # --- Validez (se incluyen pero NO se etiquetan en la UI) ---
         Item("V01", "Nunca me equivoco en el trabajo.", "V"),
         Item("V02", "Siempre mantengo la calma, sin excepción.", "V"),
         Item("V03", "Jamás me distraigo; mi concentración es perfecta.", "V"),
@@ -145,20 +148,13 @@ def blend_insights(primary: str, secondary: List[str]) -> List[str]:
         insights.append("D-I: influencia + acción; riesgo: decisiones impulsivas y baja escucha.")
     return insights
 
-
 # -----------------------------
 # Scoring
 # -----------------------------
 def reverse_score(x: int) -> int:
     return (LIKERT_MAX + LIKERT_MIN) - x
 
-def score_disc(
-    items: List[Item],
-    answers: Dict[str, int],
-    blend_ratio: float = 0.90,
-    blend_abs: int = 2,
-    validity_threshold: int = 24,
-) -> Dict:
+def score_disc(items: List[Item], answers: Dict[str, int]) -> Dict:
     dims = ["D", "I", "S", "C"]
     raw = {d: 0 for d in dims}
     validity = 0
@@ -168,6 +164,7 @@ def score_disc(
         x = answers[it.id]
         if it.reverse:
             x = reverse_score(x)
+
         if it.dim in raw:
             raw[it.dim] += x
         elif it.dim == "V":
@@ -187,14 +184,14 @@ def score_disc(
 
     secondary = []
     for d, s in ranked[1:]:
-        if (s >= top_score * blend_ratio) or ((top_score - s) <= blend_abs):
+        if (s >= top_score * BLEND_RATIO_DEFAULT) or ((top_score - s) <= BLEND_ABS_DEFAULT):
             secondary.append(d)
 
     spread = ranked[0][1] - ranked[-1][1]
     if spread <= 3:
         notes.append("Perfil poco diferenciado: puntajes muy cercanos entre dimensiones (posible estilo balanceado o respuestas neutras).")
 
-    validity_flag = validity >= validity_threshold
+    validity_flag = validity >= VALIDITY_THRESHOLD_DEFAULT
     if validity_flag:
         notes.append("Alerta de validez: patrón de respuestas 'demasiado perfecto' (posible deseabilidad social).")
 
@@ -215,9 +212,8 @@ def score_disc(
         "notes": notes,
     }
 
-
 # -----------------------------
-# Charts (colored)
+# Charts (colores solo en resultados)
 # -----------------------------
 def fig_to_png_bytes(fig) -> bytes:
     buf = io.BytesIO()
@@ -247,17 +243,14 @@ def radar_chart_bytes(pct: Dict[str, float]) -> bytes:
     ax = plt.subplot(111, polar=True)
     ax.set_title("DISC — Diagrama de araña (0–100%)")
     ax.plot(angles, vals, color="#333333", linewidth=2)
-    # relleno neutro para evitar “dominancia” visual por color
     ax.fill(angles, vals, alpha=0.12)
     ax.set_thetagrids([a * 180 / math.pi for a in angles[:-1]], dims)
     ax.set_ylim(0, 100)
     return fig_to_png_bytes(fig)
 
 def quadrant_chart_bytes(z: Dict[str, float], primary: str) -> bytes:
-    # Esquema interno de visualización
     x = (z["D"] + z["I"]) - (z["S"] + z["C"])
     y = (z["D"] + z["C"]) - (z["I"] + z["S"])
-
     fig = plt.figure()
     plt.title("Mapa conductual (esquema)")
     plt.axhline(0)
@@ -269,7 +262,6 @@ def quadrant_chart_bytes(z: Dict[str, float], primary: str) -> bytes:
     plt.ylabel("Orientado a tarea  ←→  Orientado a personas")
     return fig_to_png_bytes(fig)
 
-
 # -----------------------------
 # PDF (in-memory)
 # -----------------------------
@@ -277,8 +269,7 @@ def build_pdf_bytes(person_name: str, role: str, result: Dict,
                     img_bar: bytes, img_radar: bytes, img_quad: bytes) -> bytes:
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
-    width, height = A4
-    y = height - 2 * cm
+    y = A4[1] - 2 * cm
 
     def line(txt, dy=0.7 * cm, size=11, bold=False):
         nonlocal y
@@ -288,7 +279,6 @@ def build_pdf_bytes(person_name: str, role: str, result: Dict,
 
     raw, pct = result["raw"], result["pct"]
     primary, secondary = result["primary"], result["secondary"]
-    validity_score, notes = result["validity_score"], result["notes"]
 
     line("Informe DISC (colores)", size=16, bold=True, dy=1.0 * cm)
     line(f"Nombre: {person_name}", bold=True)
@@ -297,9 +287,10 @@ def build_pdf_bytes(person_name: str, role: str, result: Dict,
         f"Resultado: {primary} ({DIM_NAMES[primary]} — {COLOR_NAME[primary]})"
         + (f" | Secundarios: {', '.join(secondary)}" if secondary else "")
     )
-    line(f"Validez (0–30): {validity_score}" + ("  [ALERTA]" if result["validity_flag"] else ""))
+    line(f"Validez (0–30): {result['validity_score']}" + ("  [ALERTA]" if result["validity_flag"] else ""))
+
     line("Notas:", bold=True)
-    for n in notes:
+    for n in result["notes"]:
         line(f"• {n}", size=10, dy=0.55 * cm)
 
     y -= 0.3 * cm
@@ -307,7 +298,6 @@ def build_pdf_bytes(person_name: str, role: str, result: Dict,
     line(f"Crudos: D={raw['D']}  I={raw['I']}  S={raw['S']}  C={raw['C']}", size=10, dy=0.55 * cm)
     line(f"% internos: D={pct['D']:.1f}  I={pct['I']:.1f}  S={pct['S']:.1f}  C={pct['C']:.1f}", size=10, dy=0.55 * cm)
 
-    # Images
     y -= 0.4 * cm
     c.drawImage(ImageReader(io.BytesIO(img_bar)), 2 * cm, y - 6 * cm, width=16 * cm, height=5.5 * cm,
                 preserveAspectRatio=True, anchor="nw")
@@ -336,230 +326,129 @@ def build_pdf_bytes(person_name: str, role: str, result: Dict,
     c.save()
     return buf.getvalue()
 
+# -----------------------------
+# UI (un solo panel + orden aleatorio)
+# -----------------------------
+st.title("DISC (colores) — Cuestionario anónimo por dimensión + Informe PDF")
+st.caption("Instrucciones: responde honestamente (1–5). El orden de preguntas se mezcla automáticamente para reducir sugestión.")
 
-# -----------------------------
-# Friendly UI helpers (CSS + pills)
-# -----------------------------
+# Estado para aleatoriedad por evaluación
+if "shuffle_seed" not in st.session_state:
+    st.session_state.shuffle_seed = int(time.time() * 1000)
+
+if "submitted" not in st.session_state:
+    st.session_state.submitted = False
+if "result" not in st.session_state:
+    st.session_state.result = None
+
+items_all = get_items()
+
+# Botón “Nueva evaluación”: limpia respuestas y remezcla orden
+topA, topB, topC = st.columns([1.2, 1, 1])
+with topA:
+    person_name = st.text_input("Nombre evaluado", value=st.session_state.get("person_name", ""))
+with topB:
+    role = st.text_input("Rol/Área", value=st.session_state.get("role", ""))
+with topC:
+    if st.button("🔄 Nueva evaluación (remezclar preguntas)", use_container_width=True):
+        # Reset
+        st.session_state.shuffle_seed = int(time.time() * 1000)
+        st.session_state.submitted = False
+        st.session_state.result = None
+        # borrar respuestas
+        for it in items_all:
+            k = f"ans_{it.id}"
+            if k in st.session_state:
+                del st.session_state[k]
+        st.rerun()
+
+st.session_state["person_name"] = person_name
+st.session_state["role"] = role
+
+# Mezcla determinística por seed de sesión/evaluación
+items_shuffled = items_all.copy()
+rng = random.Random(st.session_state.shuffle_seed)
+rng.shuffle(items_shuffled)
+
+# CSS mínimo para hacerlo más limpio
 st.markdown(
     """
 <style>
-/* simple cards */
-.card {
+.qcard {
   padding: 14px 16px;
   border-radius: 14px;
   border: 1px solid rgba(0,0,0,0.08);
-  background: rgba(255,255,255,0.6);
+  background: rgba(255,255,255,0.65);
+  margin-bottom: 10px;
 }
-.pill {
-  display: inline-block;
-  padding: 6px 10px;
-  border-radius: 999px;
-  font-weight: 600;
-  font-size: 12px;
-  margin-right: 8px;
-  border: 1px solid rgba(0,0,0,0.12);
-}
-.small {
-  font-size: 12px;
-  opacity: 0.85;
-}
+.small { font-size: 12px; opacity: 0.85; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-def pill(dim: str, text: str) -> str:
-    bg = COLOR_HEX.get(dim, "#888888")
-    return f'<span class="pill" style="background:{bg}; color:#111;">{text}</span>'
-
-def legend_block():
-    st.markdown(
-        f"""
-<div class="card">
-  <div style="margin-bottom:8px;">
-    {pill("D","Rojo — D (Dominancia)")}
-    {pill("I","Amarillo — I (Influencia)")}
-    {pill("S","Verde — S (Estabilidad)")}
-    {pill("C","Azul — C (Cumplimiento/Conciencia)")}
-  </div>
-  <div class="small">
-    Mapeo de colores popularizado por <i>Surrounded by Idiots</i>: rojo=dominante, amarillo=influyente, verde=estable, azul=compliant. 
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-def render_item(it: Item):
-    st.radio(
-        f"[{it.id}] {it.text}" + ("  🔁" if it.reverse else ""),
-        options=[1, 2, 3, 4, 5],
-        index=2,
-        horizontal=True,
-        format_func=lambda x: f"{LIKERT_EMOJI[x]}  {LIKERT_LABELS[x]}",
-        key=f"ans_{it.id}",
-    )
-
-
-# -----------------------------
-# App state
-# -----------------------------
-items = get_items()
-if "computed" not in st.session_state:
-    st.session_state["computed"] = False
-if "result" not in st.session_state:
-    st.session_state["result"] = None
-
-# -----------------------------
-# Sidebar (wizard)
-# -----------------------------
-with st.sidebar:
-    st.title("DISC — Colores")
-    step = st.radio("Navegación", ["1) Datos", "2) Cuestionario", "3) Resultados"], index=0)
-    st.divider()
-    st.subheader("Parámetros")
-    blend_ratio = st.slider("Blend ratio (cercanía al top)", 0.70, 0.98, 0.90, 0.01)
-    blend_abs = st.slider("Blend diferencia absoluta (puntos)", 0, 8, 2, 1)
-    validity_threshold = st.slider("Umbral alerta validez (0–30)", 10, 30, 24, 1)
-    show_validity = st.toggle("Mostrar preguntas de validez", value=False)
-    st.divider()
-    st.caption("Nota: Este instrumento es interno (no prueba propietaria).")
-
-st.title("Evaluación DISC (colores) — Informe con gráficos y PDF")
-legend_block()
-
-# -----------------------------
-# Step 1: Datos
-# -----------------------------
-if step == "1) Datos":
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.subheader("Datos del evaluado")
-    col1, col2 = st.columns(2)
-    with col1:
-        person_name = st.text_input("Nombre evaluado", value=st.session_state.get("person_name", ""))
-    with col2:
-        role = st.text_input("Rol/Área", value=st.session_state.get("role", ""))
-
-    st.session_state["person_name"] = person_name
-    st.session_state["role"] = role
-
+with st.form("disc_form", clear_on_submit=False):
+    st.markdown('<div class="qcard">', unsafe_allow_html=True)
+    st.markdown("**Escala:** 1=Totalmente en desacuerdo … 5=Totalmente de acuerdo")
+    st.markdown('<div class="small">Tip: evita responder todo “3”; usa los extremos cuando aplique.</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    st.info("Siguiente: ve a **2) Cuestionario** para responder y calcular resultados.")
+    for idx, it in enumerate(items_shuffled, start=1):
+        # NO mostramos dim, color ni si está invertida.
+        # (La inversión se aplica internamente en el scoring)
+        st.markdown('<div class="qcard">', unsafe_allow_html=True)
+        st.markdown(f"**{idx}.** {it.text}")
+        st.radio(
+            label="",
+            options=[1, 2, 3, 4, 5],
+            index=2,
+            horizontal=True,
+            format_func=lambda x: LIKERT_LABELS[x],
+            key=f"ans_{it.id}",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    submit = st.form_submit_button("✅ Calcular resultados y generar informe")
+
+if submit:
+    st.session_state.submitted = True
+    answers = {it.id: int(st.session_state.get(f"ans_{it.id}", 3)) for it in items_all}
+    st.session_state.result = score_disc(items_all, answers)
 
 # -----------------------------
-# Step 2: Cuestionario
+# Resultados (en la misma pantalla)
 # -----------------------------
-elif step == "2) Cuestionario":
-    person_name = st.session_state.get("person_name", "").strip() or "N/A"
-    role = st.session_state.get("role", "").strip() or "N/A"
-
-    # Group items
-    by_dim = {"D": [], "I": [], "S": [], "C": [], "V": []}
-    for it in items:
-        by_dim[it.dim].append(it)
-
-    st.subheader("Cuestionario (1–5)")
-    tabs = st.tabs(["🔴 D (Rojo)", "🟡 I (Amarillo)", "🟢 S (Verde)", "🔵 C (Azul)"] + (["⚪ Validez"] if show_validity else []))
-
-    with tabs[0]:
-        st.markdown(f"{pill('D','Rojo — Dominancia')}", unsafe_allow_html=True)
-        for it in by_dim["D"]:
-            render_item(it)
-
-    with tabs[1]:
-        st.markdown(f"{pill('I','Amarillo — Influencia')}", unsafe_allow_html=True)
-        for it in by_dim["I"]:
-            render_item(it)
-
-    with tabs[2]:
-        st.markdown(f"{pill('S','Verde — Estabilidad')}", unsafe_allow_html=True)
-        for it in by_dim["S"]:
-            render_item(it)
-
-    with tabs[3]:
-        st.markdown(f"{pill('C','Azul — Cumplimiento/Conciencia')}", unsafe_allow_html=True)
-        for it in by_dim["C"]:
-            render_item(it)
-
-    if show_validity:
-        with tabs[4]:
-            st.markdown(f"{pill('V','Validez (opcional)')}", unsafe_allow_html=True)
-            st.caption("Estas preguntas ayudan a detectar respuestas “demasiado perfectas”.")
-            for it in by_dim["V"]:
-                render_item(it)
-
-    # Progress (simple: all answered because default exists, but still useful UX)
-    answered = sum(1 for it in items if f"ans_{it.id}" in st.session_state)
-    total_needed = len(items) if show_validity else len([it for it in items if it.dim != "V"])
-    progress = min(1.0, answered / max(total_needed, 1))
-    st.progress(progress)
-
-    cA, cB = st.columns([1, 1])
-    with cA:
-        if st.button("🧮 Calcular resultados", use_container_width=True):
-            # Build answers (include V only if shown; otherwise set neutral 3 for V so scoring no falla)
-            answers = {}
-            for it in items:
-                k = f"ans_{it.id}"
-                if it.dim == "V" and not show_validity:
-                    answers[it.id] = 3
-                else:
-                    answers[it.id] = int(st.session_state.get(k, 3))
-
-            result = score_disc(
-                items, answers,
-                blend_ratio=float(blend_ratio),
-                blend_abs=int(blend_abs),
-                validity_threshold=int(validity_threshold),
-            )
-            st.session_state["result"] = result
-            st.session_state["computed"] = True
-            st.success("Listo. Ve a **3) Resultados**.")
-    with cB:
-        st.caption(f"Evaluado: **{person_name}**  |  Rol/Área: **{role}**")
-
-# -----------------------------
-# Step 3: Resultados
-# -----------------------------
-else:
-    if not st.session_state.get("computed") or not st.session_state.get("result"):
-        st.warning("Aún no hay resultados. Completa **2) Cuestionario** y pulsa **Calcular resultados**.")
-        st.stop()
-
-    person_name = st.session_state.get("person_name", "").strip() or "N/A"
-    role = st.session_state.get("role", "").strip() or "N/A"
-    result = st.session_state["result"]
+if st.session_state.submitted and st.session_state.result:
+    result = st.session_state.result
+    person = (st.session_state.get("person_name") or "").strip() or "N/A"
+    role = (st.session_state.get("role") or "").strip() or "N/A"
 
     primary = result["primary"]
     secondary = result["secondary"]
 
-    st.subheader("Resultados")
-    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.divider()
+    st.subheader("Resultados (colores)")
 
-    col1, col2, col3 = st.columns([1.2, 1, 1])
-    with col1:
+    r1, r2, r3 = st.columns([1.6, 1, 1])
+    with r1:
+        sec_txt = (", ".join(secondary)) if secondary else "—"
         st.markdown(
-            f"{pill(primary, f'{COLOR_NAME[primary]} — {primary} ({DIM_NAMES[primary]})')}"
-            + (f" {pill('V', 'Blend: ' + '-'.join([primary]+secondary))}" if secondary else ""),
-            unsafe_allow_html=True,
+            f"**Primario:** {primary} — {COLOR_NAME[primary]} ({DIM_NAMES[primary]})  \n"
+            f"**Secundarios:** {sec_txt}"
         )
         for n in result["notes"]:
             st.write(f"- {n}")
 
-    with col2:
-        st.metric("Validez (0–30)", str(result["validity_score"]), delta="⚠️" if result["validity_flag"] else "")
-        st.caption("Si hay alerta, interpreta con cautela.")
+    with r2:
+        st.metric("Validez (0–30)", str(result["validity_score"]),
+                  delta="⚠️" if result["validity_flag"] else "")
+        st.caption("Si hay alerta, interpreta con cautela (posible deseabilidad social).")
 
-    with col3:
-        # Mostrar % del primario (motivador y claro)
-        pct_primary = round(result["pct"][primary], 1)
-        st.metric("% interno del primario", f"{pct_primary}%")
-        st.caption("Distribución relativa entre D/I/S/C dentro de la persona.")
+    with r3:
+        st.metric("% interno del primario", f"{result['pct'][primary]:.1f}%")
+        st.caption("Distribución relativa dentro de la persona.")
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # Charts
+    # Gráficas
     img_bar = bar_chart_bytes(result["raw"])
     img_radar = radar_chart_bytes(result["pct"])
     img_quad = quadrant_chart_bytes(result["z"], primary=primary)
@@ -575,17 +464,14 @@ else:
         st.markdown("**% internos**")
         st.json({k: round(v, 1) for k, v in result["pct"].items()})
 
-    st.divider()
-
-    # Strengths / Development
     st.subheader("Virtudes y puntos a trabajar (según primario)")
     c3, c4 = st.columns(2)
     with c3:
-        st.markdown(f"{pill(primary, 'Virtudes')}", unsafe_allow_html=True)
+        st.markdown(f"**Virtudes ({COLOR_NAME[primary]})**")
         for s in STRENGTHS[primary]:
             st.write(f"- {s}")
     with c4:
-        st.markdown(f"{pill(primary, 'Puntos a trabajar')}", unsafe_allow_html=True)
+        st.markdown("**Puntos a trabajar**")
         for d in DEVELOP[primary]:
             st.write(f"- {d}")
 
@@ -594,12 +480,11 @@ else:
         st.write(f"- {bi}")
 
     # PDF
-    pdf_bytes = build_pdf_bytes(person_name, role, result, img_bar, img_radar, img_quad)
-
+    pdf_bytes = build_pdf_bytes(person, role, result, img_bar, img_radar, img_quad)
     st.download_button(
         label="⬇️ Descargar informe PDF",
         data=pdf_bytes,
-        file_name=f"informe_DISC_{person_name.replace(' ', '_')}.pdf",
+        file_name=f"informe_DISC_{person.replace(' ', '_')}.pdf",
         mime="application/pdf",
         use_container_width=True,
     )
