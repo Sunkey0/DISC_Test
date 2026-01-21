@@ -7,10 +7,14 @@ from typing import Dict, List, Literal, Tuple
 
 import streamlit as st
 import matplotlib.pyplot as plt
+
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
+from reportlab.lib import colors
 from reportlab.lib.units import cm
-from reportlab.lib.utils import ImageReader
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+)
 
 # -----------------------------
 # Config (sin parámetros visibles)
@@ -18,12 +22,12 @@ from reportlab.lib.utils import ImageReader
 st.set_page_config(page_title="DISC (Colores) — Cuestionario + Informe", layout="wide")
 
 LIKERT_MIN, LIKERT_MAX = 1, 5
-Dim = Literal["D", "I", "S", "C", "V"]  # V = validez (oculta en UI)
+Dim = Literal["D", "I", "S", "C", "V"]
 
-# Defaults internos
+# Defaults internos (no se muestran)
 BLEND_RATIO_DEFAULT = 0.90
 BLEND_ABS_DEFAULT = 2
-VALIDITY_THRESHOLD_DEFAULT = 24  # 0–30 con 6 ítems V
+VALIDITY_THRESHOLD_DEFAULT = 24  # 6 ítems * max 5 = 30
 
 # Colores tipo "Rodeado de idiotas"
 COLOR_HEX = {
@@ -49,9 +53,10 @@ LIKERT_LABELS = {
     4: "4 — De acuerdo",
     5: "5 — Totalmente de acuerdo",
 }
+LIKERT_EMOJI = {1: "😟", 2: "🙁", 3: "😐", 4: "🙂", 5: "😄"}
 
 # -----------------------------
-# Data
+# Cuestionario
 # -----------------------------
 @dataclass(frozen=True)
 class Item:
@@ -110,7 +115,7 @@ def get_items() -> List[Item]:
         Item("C09", "Prefiero mensajes estructurados: objetivos, pasos, criterios.", "C"),
         Item("C10", "A menudo entrego sin revisar porque confío en mi primera versión.", "C", reverse=True),
 
-        # --- Validez (se incluyen pero NO se etiquetan en la UI) ---
+        # --- Validez (mezcladas, no visibles como tal) ---
         Item("V01", "Nunca me equivoco en el trabajo.", "V"),
         Item("V02", "Siempre mantengo la calma, sin excepción.", "V"),
         Item("V03", "Jamás me distraigo; mi concentración es perfecta.", "V"),
@@ -119,34 +124,52 @@ def get_items() -> List[Item]:
         Item("V06", "Mis decisiones siempre son objetivamente correctas.", "V"),
     ]
 
+# -----------------------------
+# Interpretación (más rica)
+# -----------------------------
 STRENGTHS = {
     "D": ["Orientación a resultados", "Decisión y rapidez", "Asertividad", "Capacidad para destrabar problemas"],
     "I": ["Comunicación persuasiva", "Energía social", "Motivación del equipo", "Networking y visibilidad"],
     "S": ["Constancia y paciencia", "Trabajo en equipo", "Escucha activa", "Estabilidad bajo presión"],
     "C": ["Precisión y calidad", "Análisis y criterio", "Gestión de riesgos", "Orden y estandarización"],
 }
-DEVELOP = {
-    "D": ["Practicar escucha antes de decidir", "Bajar intensidad en confrontación", "Validar impactos en personas/proceso"],
-    "I": ["Aterrizar ideas en planes medibles", "Gestionar dispersión", "Dar espacio a perfiles más reservados"],
-    "S": ["Aumentar tolerancia al cambio", "Poner límites (evitar sobrecarga)", "Expresar desacuerdo a tiempo"],
-    "C": ["Evitar perfeccionismo/parálisis por análisis", "Delegar con criterios claros", "Simplificar comunicación cuando se requiere velocidad"],
+RISKS = {
+    "D": ["Puede sonar duro o impaciente", "Riesgo de decidir sin suficiente alineación", "Subestimar impactos emocionales"],
+    "I": ["Riesgo de dispersión", "Sobre-optimismo sin plan", "Puede evitar detalles o seguimiento"],
+    "S": ["Resistencia a cambios bruscos", "Evita conflicto aunque sea necesario", "Dificultad para decir 'no'"],
+    "C": ["Perfeccionismo / parálisis por análisis", "Rigidez con reglas", "Dificultad para delegar"],
 }
+UNDER_PRESSURE = {
+    "D": ["Acelera y controla", "Exige respuestas rápidas", "Tolera menos la ambigüedad social"],
+    "I": ["Habla más y busca apoyo social", "Puede saltar entre temas", "Se frustra con lo muy técnico"],
+    "S": ["Se retrae y busca estabilidad", "Puede postergar decisiones", "Prioriza armonía sobre fricción útil"],
+    "C": ["Aumenta la revisión y control", "Pide evidencia/criterios", "Puede frenar velocidad del equipo"],
+}
+MANAGER_TIPS = {
+    "D": ["Acordar metas y autoridad claras", "Ir a lo concreto: impacto/ROI/tiempos", "Dar opciones (A/B) y pedir decisión"],
+    "I": ["Reconocer logros públicamente cuando aplique", "Aterrizar con fechas/propietarios", "Usar ejemplos e impacto en personas"],
+    "S": ["Dar contexto y tiempo de transición", "Asegurar estabilidad en prioridades", "Pedir opinión y cerrar acuerdos por escrito"],
+    "C": ["Entregar datos, criterios y definición de 'hecho'", "Evitar improvisación sin plan", "Acordar umbrales para decidir sin esperar perfección"],
+}
+
+def blend_label(primary: str, secondary: List[str]) -> str:
+    return primary if not secondary else "-".join([primary] + secondary)
 
 def blend_insights(primary: str, secondary: List[str]) -> List[str]:
     if not secondary:
-        return [f"Perfil focalizado en {DIM_NAMES[primary]}: alto impacto si se ubica en roles alineados a esa prioridad."]
+        return [f"Predomina {DIM_NAMES[primary]} ({COLOR_NAME[primary]})."]
     combo = [primary] + secondary
     s = "-".join(combo)
-    insights = [f"Blend {s}: el comportamiento puede variar según presión, rol y contexto."]
+    out = [f"Blend {s}: el estilo puede variar según rol, presión y tipo de tarea."]
     if primary == "D" and "C" in secondary:
-        insights.append("D-C: empuje por resultados con exigencia de calidad; riesgo: dureza y criticidad.")
+        out.append("D-C: empuje por resultados con exigencia de calidad; riesgo: criticidad y baja paciencia.")
     if primary == "I" and "S" in secondary:
-        insights.append("I-S: cercanía y soporte; riesgo: evitar conflictos necesarios.")
+        out.append("I-S: conexión + soporte; riesgo: evitar conversaciones difíciles.")
     if primary == "C" and "S" in secondary:
-        insights.append("C-S: estabilidad + precisión; riesgo: resistencia a cambios rápidos.")
+        out.append("C-S: estabilidad + precisión; riesgo: resistencia a cambios rápidos.")
     if primary == "D" and "I" in secondary:
-        insights.append("D-I: influencia + acción; riesgo: decisiones impulsivas y baja escucha.")
-    return insights
+        out.append("D-I: acción + influencia; riesgo: decisiones impulsivas y menor escucha.")
+    return out
 
 # -----------------------------
 # Scoring
@@ -164,7 +187,6 @@ def score_disc(items: List[Item], answers: Dict[str, int]) -> Dict:
         x = answers[it.id]
         if it.reverse:
             x = reverse_score(x)
-
         if it.dim in raw:
             raw[it.dim] += x
         elif it.dim == "V":
@@ -189,18 +211,13 @@ def score_disc(items: List[Item], answers: Dict[str, int]) -> Dict:
 
     spread = ranked[0][1] - ranked[-1][1]
     if spread <= 3:
-        notes.append("Perfil poco diferenciado: puntajes muy cercanos entre dimensiones (posible estilo balanceado o respuestas neutras).")
+        notes.append("Perfil poco diferenciado: puntajes cercanos entre dimensiones (posible estilo balanceado o respuestas muy neutras).")
 
     validity_flag = validity >= VALIDITY_THRESHOLD_DEFAULT
     if validity_flag:
-        notes.append("Alerta de validez: patrón de respuestas 'demasiado perfecto' (posible deseabilidad social).")
+        notes.append("Alerta de validez: respuestas 'demasiado perfectas' (posible deseabilidad social).")
 
-    if not secondary:
-        notes.append(f"Estilo predominante: {primary} ({COLOR_NAME[primary]}).")
-    else:
-        combo = "-".join([primary] + secondary)
-        notes.append(f"Estilo combinado (blend): {combo}.")
-
+    notes.append(f"Estilo: {blend_label(primary, secondary)}.")
     return {
         "raw": raw,
         "pct": pct,
@@ -210,10 +227,11 @@ def score_disc(items: List[Item], answers: Dict[str, int]) -> Dict:
         "validity_score": validity,
         "validity_flag": validity_flag,
         "notes": notes,
+        "ranked": ranked,
     }
 
 # -----------------------------
-# Charts (colores solo en resultados)
+# Charts (bytes)
 # -----------------------------
 def fig_to_png_bytes(fig) -> bytes:
     buf = io.BytesIO()
@@ -224,10 +242,10 @@ def fig_to_png_bytes(fig) -> bytes:
 def bar_chart_bytes(raw: Dict[str, int]) -> bytes:
     dims = ["D", "I", "S", "C"]
     vals = [raw[d] for d in dims]
-    colors = [COLOR_HEX[d] for d in dims]
+    colors_ = [COLOR_HEX[d] for d in dims]
     fig = plt.figure()
     plt.title("DISC — Puntajes crudos")
-    plt.bar(dims, vals, color=colors)
+    plt.bar(dims, vals, color=colors_)
     plt.xlabel("Dimensión")
     plt.ylabel("Puntaje")
     return fig_to_png_bytes(fig)
@@ -238,10 +256,9 @@ def radar_chart_bytes(pct: Dict[str, float]) -> bytes:
     vals += vals[:1]
     angles = [i * 2 * math.pi / 4 for i in range(4)]
     angles += angles[:1]
-
     fig = plt.figure()
     ax = plt.subplot(111, polar=True)
-    ax.set_title("DISC — Diagrama de araña (0–100%)")
+    ax.set_title("DISC — Araña (0–100% internos)")
     ax.plot(angles, vals, color="#333333", linewidth=2)
     ax.fill(angles, vals, alpha=0.12)
     ax.set_thetagrids([a * 180 / math.pi for a in angles[:-1]], dims)
@@ -255,186 +272,316 @@ def quadrant_chart_bytes(z: Dict[str, float], primary: str) -> bytes:
     plt.title("Mapa conductual (esquema)")
     plt.axhline(0)
     plt.axvline(0)
-    plt.scatter([x], [y], color=COLOR_HEX[primary], s=80)
+    plt.scatter([x], [y], color=COLOR_HEX[primary], s=90)
     plt.xlim(-4, 4)
     plt.ylim(-4, 4)
     plt.xlabel("Activo/Rápido  ←→  Estable/Metódico")
-    plt.ylabel("Orientado a tarea  ←→  Orientado a personas")
+    plt.ylabel("Tarea  ←→  Personas")
+    return fig_to_png_bytes(fig)
+
+def donut_chart_bytes(pct: Dict[str, float]) -> bytes:
+    dims = ["D", "I", "S", "C"]
+    vals = [pct[d] for d in dims]
+    colors_ = [COLOR_HEX[d] for d in dims]
+    fig = plt.figure()
+    plt.title("DISC — Composición (%)")
+    wedges, _ = plt.pie(vals, colors=colors_, startangle=90)
+    centre_circle = plt.Circle((0, 0), 0.65, fc="white")
+    plt.gca().add_artist(centre_circle)
+    plt.legend(wedges, dims, loc="center left", bbox_to_anchor=(1.0, 0.5))
+    plt.axis("equal")
     return fig_to_png_bytes(fig)
 
 # -----------------------------
-# PDF (in-memory)
+# PDF (más completo) con Platypus
 # -----------------------------
+def _img_from_bytes(png_bytes: bytes, width_cm: float) -> Image:
+    bio = io.BytesIO(png_bytes)
+    img = Image(bio)
+    img.drawWidth = width_cm * cm
+    # mantener proporción aproximada
+    img.drawHeight = img.drawWidth * 0.62
+    return img
+
 def build_pdf_bytes(person_name: str, role: str, result: Dict,
-                    img_bar: bytes, img_radar: bytes, img_quad: bytes) -> bytes:
+                    img_bar: bytes, img_radar: bytes, img_quad: bytes, img_donut: bytes) -> bytes:
     buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    y = A4[1] - 2 * cm
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=1.6*cm, rightMargin=1.6*cm, topMargin=1.6*cm, bottomMargin=1.6*cm)
 
-    def line(txt, dy=0.7 * cm, size=11, bold=False):
-        nonlocal y
-        c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-        c.drawString(2 * cm, y, txt)
-        y -= dy
+    styles = getSampleStyleSheet()
+    H1 = ParagraphStyle("H1", parent=styles["Heading1"], fontSize=16, spaceAfter=10)
+    H2 = ParagraphStyle("H2", parent=styles["Heading2"], fontSize=12, spaceBefore=10, spaceAfter=6)
+    P = ParagraphStyle("P", parent=styles["BodyText"], fontSize=10, leading=13)
+    Small = ParagraphStyle("Small", parent=styles["BodyText"], fontSize=9, leading=12, textColor=colors.grey)
 
-    raw, pct = result["raw"], result["pct"]
-    primary, secondary = result["primary"], result["secondary"]
+    story = []
 
-    line("Informe DISC (colores)", size=16, bold=True, dy=1.0 * cm)
-    line(f"Nombre: {person_name}", bold=True)
-    line(f"Rol/Área: {role}")
-    line(
-        f"Resultado: {primary} ({DIM_NAMES[primary]} — {COLOR_NAME[primary]})"
-        + (f" | Secundarios: {', '.join(secondary)}" if secondary else "")
-    )
-    line(f"Validez (0–30): {result['validity_score']}" + ("  [ALERTA]" if result["validity_flag"] else ""))
+    primary = result["primary"]
+    secondary = result["secondary"]
+    raw = result["raw"]
+    pct = result["pct"]
+    z = result["z"]
+    ranked = result["ranked"]
 
-    line("Notas:", bold=True)
+    story.append(Paragraph("Informe DISC (colores) — Uso interno", H1))
+    story.append(Paragraph(f"<b>Evaluado:</b> {person_name} &nbsp;&nbsp; <b>Rol/Área:</b> {role}", P))
+    story.append(Paragraph(f"<b>Resultado:</b> {blend_label(primary, secondary)}  "
+                           f"(<b>Primario:</b> {primary} — {COLOR_NAME[primary]} / {DIM_NAMES[primary]})", P))
+    story.append(Paragraph(f"<b>Validez:</b> {result['validity_score']} / 30"
+                           f"{' &nbsp;&nbsp; <b>ALERTA</b>' if result['validity_flag'] else ''}", P))
+    story.append(Spacer(1, 8))
+
+    story.append(Paragraph("Qué significa (modelo por colores)", H2))
+    story.append(Paragraph(
+        "Este instrumento clasifica estilos conductuales en cuatro colores: "
+        "<b>Rojo (D)</b> orientado a resultados y decisión; "
+        "<b>Amarillo (I)</b> orientado a influencia y comunicación; "
+        "<b>Verde (S)</b> orientado a estabilidad y cooperación; "
+        "<b>Azul (C)</b> orientado a precisión y estándares. "
+        "La mayoría de personas presenta una mezcla (1–2 colores dominantes).", P
+    ))
+    story.append(Paragraph(
+        "La mezcla (“blend”) se determina marcando como secundarias las dimensiones cercanas al puntaje máximo "
+        f"(regla interna: ≥{int(BLEND_RATIO_DEFAULT*100)}% del top o diferencia ≤{BLEND_ABS_DEFAULT} puntos).", Small
+    ))
+    story.append(Spacer(1, 10))
+
+    story.append(Paragraph("Resumen ejecutivo", H2))
     for n in result["notes"]:
-        line(f"• {n}", size=10, dy=0.55 * cm)
+        story.append(Paragraph(f"• {n}", P))
+    story.append(Spacer(1, 8))
 
-    y -= 0.3 * cm
-    line("Puntajes:", bold=True)
-    line(f"Crudos: D={raw['D']}  I={raw['I']}  S={raw['S']}  C={raw['C']}", size=10, dy=0.55 * cm)
-    line(f"% internos: D={pct['D']:.1f}  I={pct['I']:.1f}  S={pct['S']:.1f}  C={pct['C']:.1f}", size=10, dy=0.55 * cm)
+    # Tabla comparativa
+    story.append(Paragraph("Tabla de puntajes", H2))
+    table_data = [["Color", "Dim", "Nombre", "Raw", "% interno", "Z (intra)"]]
+    # mantener orden por ranking
+    for d, s in ranked:
+        if d not in ["D", "I", "S", "C"]:
+            continue
+        table_data.append([COLOR_NAME[d], d, DIM_NAMES[d], str(raw[d]), f"{pct[d]:.1f}", f"{z[d]:.2f}"])
 
-    y -= 0.4 * cm
-    c.drawImage(ImageReader(io.BytesIO(img_bar)), 2 * cm, y - 6 * cm, width=16 * cm, height=5.5 * cm,
-                preserveAspectRatio=True, anchor="nw")
-    y -= 6.3 * cm
-    c.drawImage(ImageReader(io.BytesIO(img_radar)), 2 * cm, y - 6 * cm, width=8 * cm, height=5.5 * cm,
-                preserveAspectRatio=True, anchor="nw")
-    c.drawImage(ImageReader(io.BytesIO(img_quad)), 10 * cm, y - 6 * cm, width=8 * cm, height=5.5 * cm,
-                preserveAspectRatio=True, anchor="nw")
-    y -= 6.3 * cm
+    t = Table(table_data, colWidths=[2.0*cm, 1.0*cm, 5.3*cm, 1.4*cm, 2.2*cm, 2.1*cm])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.black),
+        ("GRID", (0,0), (-1,-1), 0.25, colors.lightgrey),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 9),
+        ("ALIGN", (3,1), (-1,-1), "CENTER"),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 10))
 
-    line("Virtudes (altas probabilidades):", bold=True)
-    for s in STRENGTHS[primary]:
-        line(f"• {s}", size=10, dy=0.55 * cm)
+    # Gráficos
+    story.append(Paragraph("Gráficos", H2))
+    story.append(_img_from_bytes(img_bar, width_cm=17.0))
+    story.append(Spacer(1, 6))
+    row = Table([[_img_from_bytes(img_radar, 8.2), _img_from_bytes(img_donut, 8.2)]], colWidths=[8.2*cm, 8.2*cm])
+    story.append(row)
+    story.append(Spacer(1, 6))
+    story.append(_img_from_bytes(img_quad, width_cm=17.0))
+    story.append(Spacer(1, 10))
 
-    y -= 0.2 * cm
-    line("Puntos a trabajar (sugerencias):", bold=True)
-    for d in DEVELOP[primary]:
-        line(f"• {d}", size=10, dy=0.55 * cm)
+    story.append(PageBreak())
 
-    y -= 0.2 * cm
-    line("Lectura del blend:", bold=True)
+    # Detalle por dimensión (orden ranking)
+    story.append(Paragraph("Detalle por dimensión (interpretación)", H1))
+    story.append(Paragraph(
+        "Las siguientes descripciones son recomendaciones conductuales para desarrollo. "
+        "No deben usarse como criterio único de selección. Interpretar con el contexto del rol.", Small
+    ))
+    story.append(Spacer(1, 8))
+
+    for d, _ in ranked:
+        if d not in ["D", "I", "S", "C"]:
+            continue
+        badge = f"<b>{d}</b> — {COLOR_NAME[d]} / {DIM_NAMES[d]}  (Raw {raw[d]} | {pct[d]:.1f}% | Z {z[d]:.2f})"
+        story.append(Paragraph(badge, H2))
+
+        story.append(Paragraph("<b>Fortalezas probables</b>", P))
+        for s in STRENGTHS[d]:
+            story.append(Paragraph(f"• {s}", P))
+
+        story.append(Paragraph("<b>Riesgos típicos</b>", P))
+        for r in RISKS[d]:
+            story.append(Paragraph(f"• {r}", P))
+
+        story.append(Paragraph("<b>Bajo presión</b>", P))
+        for up in UNDER_PRESSURE[d]:
+            story.append(Paragraph(f"• {up}", P))
+
+        story.append(Paragraph("<b>Recomendaciones para manager / equipo</b>", P))
+        for tip in MANAGER_TIPS[d]:
+            story.append(Paragraph(f"• {tip}", P))
+
+        story.append(Spacer(1, 10))
+
+    # Blend
+    story.append(PageBreak())
+    story.append(Paragraph("Lectura del blend (mezcla)", H1))
     for bi in blend_insights(primary, secondary):
-        line(f"• {bi}", size=10, dy=0.55 * cm)
+        story.append(Paragraph(f"• {bi}", P))
+    story.append(Spacer(1, 8))
 
-    c.showPage()
-    c.save()
+    story.append(Paragraph("Sugerencias prácticas para el rol", H2))
+    if secondary:
+        story.append(Paragraph(
+            "Cuando hay 2 o más colores dominantes, es normal ver cambios de estilo según el tipo de tarea: "
+            "interacción social (I), urgencia/resultados (D), estabilidad (S) o calidad/reglas (C). "
+            "Para gestión, conviene acordar: métricas de éxito, criterio de decisión y cadencia de seguimiento.", P
+        ))
+    else:
+        story.append(Paragraph(
+            "Cuando hay un color claramente dominante, el rendimiento mejora si las tareas y el entorno "
+            "alinean esa prioridad. Para balancear, se recomiendan rutinas concretas que compensen los riesgos típicos.", P
+        ))
+
+    doc.build(story)
     return buf.getvalue()
 
 # -----------------------------
-# UI (un solo panel + orden aleatorio)
+# Estado + Aleatoriedad + Wizard 1 pregunta
 # -----------------------------
-st.title("DISC (colores) — Cuestionario anónimo por dimensión + Informe PDF")
-st.caption("Instrucciones: responde honestamente (1–5). El orden de preguntas se mezcla automáticamente para reducir sugestión.")
-
-# Estado para aleatoriedad por evaluación
-if "shuffle_seed" not in st.session_state:
-    st.session_state.shuffle_seed = int(time.time() * 1000)
-
-if "submitted" not in st.session_state:
-    st.session_state.submitted = False
-if "result" not in st.session_state:
-    st.session_state.result = None
-
 items_all = get_items()
 
-# Botón “Nueva evaluación”: limpia respuestas y remezcla orden
-topA, topB, topC = st.columns([1.2, 1, 1])
-with topA:
-    person_name = st.text_input("Nombre evaluado", value=st.session_state.get("person_name", ""))
-with topB:
-    role = st.text_input("Rol/Área", value=st.session_state.get("role", ""))
-with topC:
-    if st.button("🔄 Nueva evaluación (remezclar preguntas)", use_container_width=True):
-        # Reset
-        st.session_state.shuffle_seed = int(time.time() * 1000)
-        st.session_state.submitted = False
-        st.session_state.result = None
-        # borrar respuestas
-        for it in items_all:
-            k = f"ans_{it.id}"
-            if k in st.session_state:
-                del st.session_state[k]
-        st.rerun()
+def init_eval():
+    st.session_state.shuffle_seed = int(time.time() * 1000)
+    st.session_state.rng = random.Random(st.session_state.shuffle_seed)
+    st.session_state.items_shuffled = items_all.copy()
+    st.session_state.rng.shuffle(st.session_state.items_shuffled)
+    st.session_state.idx = 0
+    st.session_state.answers = {}  # item_id -> 1..5
+    st.session_state.finished = False
+    st.session_state.result = None
 
-st.session_state["person_name"] = person_name
-st.session_state["role"] = role
+if "items_shuffled" not in st.session_state:
+    init_eval()
 
-# Mezcla determinística por seed de sesión/evaluación
-items_shuffled = items_all.copy()
-rng = random.Random(st.session_state.shuffle_seed)
-rng.shuffle(items_shuffled)
-
-# CSS mínimo para hacerlo más limpio
+# -----------------------------
+# UI (1 panel)
+# -----------------------------
 st.markdown(
     """
 <style>
-.qcard {
-  padding: 14px 16px;
-  border-radius: 14px;
-  border: 1px solid rgba(0,0,0,0.08);
-  background: rgba(255,255,255,0.65);
-  margin-bottom: 10px;
+.big-card {
+  padding: 22px 22px;
+  border-radius: 18px;
+  border: 1px solid rgba(0,0,0,0.10);
+  background: rgba(255,255,255,0.70);
 }
-.small { font-size: 12px; opacity: 0.85; }
+.q-title {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+.q-sub {
+  font-size: 13px;
+  opacity: 0.85;
+}
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-with st.form("disc_form", clear_on_submit=False):
-    st.markdown('<div class="qcard">', unsafe_allow_html=True)
-    st.markdown("**Escala:** 1=Totalmente en desacuerdo … 5=Totalmente de acuerdo")
-    st.markdown('<div class="small">Tip: evita responder todo “3”; usa los extremos cuando aplique.</div>', unsafe_allow_html=True)
+st.title("DISC (colores) — Cuestionario + Informe PDF")
+st.caption("Responde honesto. Las preguntas están mezcladas al azar y no muestran a qué color pertenecen.")
+
+top1, top2, top3 = st.columns([1.2, 1, 1])
+with top1:
+    person_name = st.text_input("Nombre evaluado", value=st.session_state.get("person_name", ""))
+with top2:
+    role = st.text_input("Rol/Área", value=st.session_state.get("role", ""))
+with top3:
+    if st.button("🔄 Nueva evaluación (mezclar de nuevo)", use_container_width=True):
+        # limpiar nombre/rol opcionalmente se conserva
+        st.session_state.answers = {}
+        st.session_state.idx = 0
+        st.session_state.finished = False
+        st.session_state.result = None
+        init_eval()
+        st.rerun()
+
+st.session_state["person_name"] = person_name
+st.session_state["role"] = role
+
+items_shuffled: List[Item] = st.session_state.items_shuffled
+n_items = len(items_shuffled)
+idx = st.session_state.idx
+
+# Progreso
+progress = (idx) / n_items if n_items else 0
+st.progress(progress)
+
+if not st.session_state.finished:
+    it = items_shuffled[idx]
+
+    st.markdown('<div class="big-card">', unsafe_allow_html=True)
+    st.markdown(f'<div class="q-sub">Pregunta {idx+1} de {n_items}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="q-title">{it.text}</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
+    st.write("")
 
-    for idx, it in enumerate(items_shuffled, start=1):
-        # NO mostramos dim, color ni si está invertida.
-        # (La inversión se aplica internamente en el scoring)
-        st.markdown('<div class="qcard">', unsafe_allow_html=True)
-        st.markdown(f"**{idx}.** {it.text}")
-        st.radio(
-            label="",
-            options=[1, 2, 3, 4, 5],
-            index=2,
-            horizontal=True,
-            format_func=lambda x: LIKERT_LABELS[x],
-            key=f"ans_{it.id}",
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
+    # Selección actual (si ya respondió)
+    current_value = st.session_state.answers.get(it.id, 3)
 
-    submit = st.form_submit_button("✅ Calcular resultados y generar informe")
+    choice = st.radio(
+        "Selecciona una opción:",
+        options=[1, 2, 3, 4, 5],
+        index=[1,2,3,4,5].index(current_value),
+        horizontal=True,
+        format_func=lambda x: f"{LIKERT_EMOJI[x]}  {LIKERT_LABELS[x]}",
+        key=f"radio_{it.id}",
+    )
 
-if submit:
-    st.session_state.submitted = True
-    answers = {it.id: int(st.session_state.get(f"ans_{it.id}", 3)) for it in items_all}
-    st.session_state.result = score_disc(items_all, answers)
+    # Guardar respuesta
+    st.session_state.answers[it.id] = int(choice)
+
+    navL, navR, navC = st.columns([1, 1, 2])
+    with navL:
+        back = st.button("⬅️ Atrás", use_container_width=True, disabled=(idx == 0))
+    with navR:
+        if idx < n_items - 1:
+            nxt = st.button("Siguiente ➡️", use_container_width=True)
+        else:
+            nxt = st.button("✅ Finalizar", use_container_width=True)
+
+    if back:
+        st.session_state.idx = max(0, idx - 1)
+        st.rerun()
+
+    if nxt:
+        if idx < n_items - 1:
+            st.session_state.idx = idx + 1
+            st.rerun()
+        else:
+            # Finalizar y calcular
+            answers = {it0.id: st.session_state.answers.get(it0.id, 3) for it0 in items_all}
+            result = score_disc(items_all, answers)
+            st.session_state.result = result
+            st.session_state.finished = True
+            st.rerun()
 
 # -----------------------------
-# Resultados (en la misma pantalla)
+# Resultados + Informe (misma pantalla)
 # -----------------------------
-if st.session_state.submitted and st.session_state.result:
+if st.session_state.finished and st.session_state.result:
     result = st.session_state.result
     person = (st.session_state.get("person_name") or "").strip() or "N/A"
-    role = (st.session_state.get("role") or "").strip() or "N/A"
+    role_ = (st.session_state.get("role") or "").strip() or "N/A"
 
     primary = result["primary"]
     secondary = result["secondary"]
 
     st.divider()
-    st.subheader("Resultados (colores)")
+    st.subheader("Resultados")
 
     r1, r2, r3 = st.columns([1.6, 1, 1])
     with r1:
-        sec_txt = (", ".join(secondary)) if secondary else "—"
         st.markdown(
             f"**Primario:** {primary} — {COLOR_NAME[primary]} ({DIM_NAMES[primary]})  \n"
-            f"**Secundarios:** {sec_txt}"
+            f"**Secundarios:** {(', '.join(secondary)) if secondary else '—'}  \n"
+            f"**Blend:** {blend_label(primary, secondary)}"
         )
         for n in result["notes"]:
             st.write(f"- {n}")
@@ -442,47 +589,51 @@ if st.session_state.submitted and st.session_state.result:
     with r2:
         st.metric("Validez (0–30)", str(result["validity_score"]),
                   delta="⚠️" if result["validity_flag"] else "")
-        st.caption("Si hay alerta, interpreta con cautela (posible deseabilidad social).")
+        st.caption("Si hay alerta, interpreta con cautela.")
 
     with r3:
         st.metric("% interno del primario", f"{result['pct'][primary]:.1f}%")
         st.caption("Distribución relativa dentro de la persona.")
 
-    # Gráficas
+    # Gráficos
     img_bar = bar_chart_bytes(result["raw"])
     img_radar = radar_chart_bytes(result["pct"])
     img_quad = quadrant_chart_bytes(result["z"], primary=primary)
+    img_donut = donut_chart_bytes(result["pct"])
 
     cL, cR = st.columns([1, 1])
     with cL:
         st.image(img_bar, caption="Barras — Puntajes crudos (colores)")
         st.image(img_radar, caption="Araña — % internos")
     with cR:
+        st.image(img_donut, caption="Donut — Composición (%)")
         st.image(img_quad, caption="Mapa conductual (esquema)")
-        st.markdown("**Puntajes crudos**")
-        st.json(result["raw"])
-        st.markdown("**% internos**")
-        st.json({k: round(v, 1) for k, v in result["pct"].items()})
 
-    st.subheader("Virtudes y puntos a trabajar (según primario)")
-    c3, c4 = st.columns(2)
-    with c3:
-        st.markdown(f"**Virtudes ({COLOR_NAME[primary]})**")
+    st.subheader("Recomendaciones rápidas (para manager/equipo)")
+    for tip in MANAGER_TIPS[primary]:
+        st.write(f"- {tip}")
+
+    st.subheader("Detalle (primario)")
+    dcol1, dcol2 = st.columns(2)
+    with dcol1:
+        st.markdown("**Fortalezas**")
         for s in STRENGTHS[primary]:
             st.write(f"- {s}")
-    with c4:
-        st.markdown("**Puntos a trabajar**")
-        for d in DEVELOP[primary]:
-            st.write(f"- {d}")
+        st.markdown("**Bajo presión**")
+        for up in UNDER_PRESSURE[primary]:
+            st.write(f"- {up}")
+    with dcol2:
+        st.markdown("**Riesgos típicos**")
+        for r in RISKS[primary]:
+            st.write(f"- {r}")
+        st.markdown("**Blend (lectura)**")
+        for bi in blend_insights(primary, secondary):
+            st.write(f"- {bi}")
 
-    st.markdown("**Lectura del blend**")
-    for bi in blend_insights(primary, secondary):
-        st.write(f"- {bi}")
-
-    # PDF
-    pdf_bytes = build_pdf_bytes(person, role, result, img_bar, img_radar, img_quad)
+    # PDF mejorado
+    pdf_bytes = build_pdf_bytes(person, role_, result, img_bar, img_radar, img_quad, img_donut)
     st.download_button(
-        label="⬇️ Descargar informe PDF",
+        label="⬇️ Descargar informe PDF (completo)",
         data=pdf_bytes,
         file_name=f"informe_DISC_{person.replace(' ', '_')}.pdf",
         mime="application/pdf",
