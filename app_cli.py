@@ -1,4 +1,3 @@
-# app_cli.py
 import os
 from questionnaire import get_items
 from scoring import score_disc
